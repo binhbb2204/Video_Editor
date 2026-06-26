@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-zinc-950 text-zinc-100 antialiased overflow-hidden;
+  }
+
+  /* Custom Scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #3f3f46;
+    /* zinc-700 */
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #52525b;
+    /* zinc-600 */
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  /* Firefox */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #3f3f46 transparent;
+  }
+
+  /* Custom Color Picker */
+  input[type="color"] {
+    -webkit-appearance: none;
+    appearance: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  input[type="color"]::-webkit-color-swatch-wrapper {
+    padding: 0;
+    border-radius: 50%;
+  }
+
+  input[type="color"]::-webkit-color-swatch {
+    border: 2px solid #52525b;
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px #18181b, inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  }
+
+  input[type="color"]:hover::-webkit-color-swatch {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px #18181b, 0 0 8px rgba(59, 130, 246, 0.4);
+  }
+
+  /* Firefox color picker */
+  input[type="color"]::-moz-color-swatch {
+    border: 2px solid #52525b;
+    border-radius: 50%;
+  }
+}
