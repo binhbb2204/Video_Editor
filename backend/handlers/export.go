@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -132,11 +134,22 @@ func StartExport(c *gin.Context) {
 	jobsLock.Unlock()
 
 	// Start export in background
+	ctx, cancel := context.WithCancel(context.Background())
+	job.Cancel = cancel
 	go func() {
 		job.Status = "processing"
 
-		err := services.ExportVideo(job, subtitles, globalStyle, resolution)
+		err := services.ExportVideo(ctx, job, subtitles, globalStyle, resolution)
+		job.Cancel = nil
+		cleanupUploadedFiles(job.VideoFiles)
 		if err != nil {
+			if err == context.Canceled {
+				log.Printf("Export canceled for job %s", jobID)
+				job.Status = "canceled"
+				job.Error = "Export canceled"
+				_ = os.Remove(job.OutputFile)
+				return
+			}
 			log.Printf("Export failed for job %s: %v", jobID, err)
 			job.Status = "failed"
 			job.Error = err.Error()
@@ -149,6 +162,40 @@ func StartExport(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"jobId":   jobID,
 		"message": "Export started",
+	})
+}
+
+// CancelExport handles POST /api/export/cancel/:id
+func CancelExport(c *gin.Context) {
+	jobID := c.Param("id")
+
+	jobsLock.RLock()
+	job, exists := jobs[jobID]
+	jobsLock.RUnlock()
+
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
+		return
+	}
+
+	if job.Status != "processing" && job.Status != "pending" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Job is not running"})
+		return
+	}
+
+	if job.Cancel != nil {
+		job.Cancel()
+	}
+
+	job.Status = "canceled"
+	job.Error = "Export canceled"
+	job.Progress = 0
+	_ = os.Remove(job.OutputFile)
+
+	c.JSON(http.StatusOK, gin.H{
+		"id":      job.ID,
+		"status":  job.Status,
+		"message": "Export canceled",
 	})
 }
 
@@ -192,7 +239,19 @@ func DownloadExport(c *gin.Context) {
 	}
 
 	// Serve the file for download
-	filename := "LipChamp_Export_" + jobID[:8] + filepath.Ext(job.OutputFile)
+	filename := "VideoEditor_Export_" + jobID[:8] + filepath.Ext(job.OutputFile)
 	c.Header("Content-Disposition", "attachment; filename="+filename)
 	c.File(job.OutputFile)
+
+	if err := os.Remove(job.OutputFile); err != nil && !os.IsNotExist(err) {
+		log.Printf("Failed to delete exported file %s: %v", job.OutputFile, err)
+	}
+}
+
+func cleanupUploadedFiles(files []string) {
+	for _, filePath := range files {
+		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+			log.Printf("Failed to delete uploaded file %s: %v", filePath, err)
+		}
+	}
 }

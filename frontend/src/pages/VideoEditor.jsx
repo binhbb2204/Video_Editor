@@ -72,10 +72,10 @@ const VideoEditor = () => {
       <header className="h-14 border-b border-zinc-900 flex items-center justify-between px-4 bg-zinc-900/50 backdrop-blur-xl z-50 shrink-0">
         <div className="flex items-center space-x-4">
           <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shadow-lg shadow-blue-500/20">
-            <span className="font-black text-xs">LC</span>
+            <span className="font-black text-[10px]">VE</span>
           </div>
           <div>
-            <h1 className="text-sm font-bold tracking-tight">LipChamp</h1>
+            <h1 className="text-sm font-bold tracking-tight">VideoEditor</h1>
             <p className="text-[10px] text-zinc-500 font-medium">Professional SRT Editor</p>
           </div>
         </div>

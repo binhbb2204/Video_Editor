@@ -130,6 +130,38 @@ export const ExportModal = ({ onClose }) => {
         }
     };
 
+    const handleCancel = async () => {
+        if (!isExporting || !jobId) {
+            onClose();
+            return;
+        }
+
+        try {
+            setExportStatus('Canceling export...');
+            const response = await fetch(`${API_URL}/api/export/cancel/${jobId}`, {
+                method: 'POST',
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Cancel failed');
+            }
+
+            if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+            }
+
+            setProgress(0);
+            setIsExporting(false);
+            setExportStatus('Export canceled');
+            onClose();
+        } catch (error) {
+            console.error('Cancel export error:', error);
+            setExportStatus(`Error: ${error.message}`);
+        }
+    };
+
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
             <div className="bg-zinc-900 border border-zinc-800 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden">
@@ -180,7 +212,7 @@ export const ExportModal = ({ onClose }) => {
                 </div>
 
                 <div className="p-4 bg-zinc-950/50 flex space-x-3">
-                    <button disabled={isExporting} onClick={onClose} className="flex-1 py-3 text-sm font-bold text-zinc-400 hover:text-white transition disabled:opacity-50">Cancel</button>
+                    <button onClick={handleCancel} className="flex-1 py-3 text-sm font-bold text-zinc-400 hover:text-white transition disabled:opacity-50">{isExporting ? 'Cancel Export' : 'Cancel'}</button>
                     <button disabled={isExporting} onClick={handleExport} className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white text-sm font-bold rounded-xl transition flex items-center justify-center space-x-2 disabled:opacity-50">
                         <ExportIcon /> <span>{isExporting ? 'Exporting...' : 'Start Export'}</span>
                     </button>

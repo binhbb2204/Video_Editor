@@ -2,6 +2,7 @@ package services
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -18,12 +19,7 @@ import (
 
 // getFFmpegPath returns the path to ffmpeg executable
 func getFFmpegPath() string {
-	// Check winget installation path first
-	wingetPath := `C:\Users\admin\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffmpeg.exe`
-	if _, err := os.Stat(wingetPath); err == nil {
-		return wingetPath
-	}
-	// Check local ffmpeg folder
+	// Check local ffmpeg folder first so the project can run without a system install.
 	localPath := filepath.Join("ffmpeg", "bin", "ffmpeg.exe")
 	if runtime.GOOS != "windows" {
 		localPath = filepath.Join("ffmpeg", "bin", "ffmpeg")
@@ -38,11 +34,7 @@ func getFFmpegPath() string {
 
 // getFFprobePath returns the path to ffprobe executable
 func getFFprobePath() string {
-	// Check winget installation path first
-	wingetPath := `C:\Users\admin\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffprobe.exe`
-	if _, err := os.Stat(wingetPath); err == nil {
-		return wingetPath
-	}
+	// Check local ffmpeg folder first so the project can run without a system install.
 	localPath := filepath.Join("ffmpeg", "bin", "ffprobe.exe")
 	if runtime.GOOS != "windows" {
 		localPath = filepath.Join("ffmpeg", "bin", "ffprobe")
@@ -55,7 +47,7 @@ func getFFprobePath() string {
 }
 
 // ExportVideo runs FFmpeg to burn subtitles into video
-func ExportVideo(job *models.ExportJob, subtitles []models.Subtitle, globalStyle models.GlobalStyle, resolution string) error {
+func ExportVideo(ctx context.Context, job *models.ExportJob, subtitles []models.Subtitle, globalStyle models.GlobalStyle, resolution string) error {
 	// Generate ASS subtitle file
 	assPath := filepath.Join("temp", job.ID+".ass")
 	if err := generateASSFile(assPath, subtitles, globalStyle, resolution); err != nil {
@@ -84,15 +76,15 @@ func ExportVideo(job *models.ExportJob, subtitles []models.Subtitle, globalStyle
 
 	if job.SubtitleOnly {
 		// Subtitle-only mode: create black background video with subtitles
-		return exportSubtitleOnly(job, escapedAssPath, videoWidth, videoHeight, duration)
+		return exportSubtitleOnly(ctx, job, escapedAssPath, videoWidth, videoHeight, duration)
 	}
 
 	// Timeline export mode: create video with clips, gaps, and subtitles
-	return exportTimeline(job, escapedAssPath, videoWidth, videoHeight, duration, resolution)
+	return exportTimeline(ctx, job, escapedAssPath, videoWidth, videoHeight, duration, resolution)
 }
 
 // exportTimeline creates a video from timeline clips with gaps filled with black
-func exportTimeline(job *models.ExportJob, assPath string, width, height int, duration float64, resolution string) error {
+func exportTimeline(ctx context.Context, job *models.ExportJob, assPath string, width, height int, duration float64, resolution string) error {
 	threads := runtime.NumCPU()
 	if threads > 8 {
 		threads = 8
@@ -103,7 +95,7 @@ func exportTimeline(job *models.ExportJob, assPath string, width, height int, du
 
 	// If no clips, treat as subtitle-only
 	if len(clips) == 0 {
-		return exportSubtitleOnly(job, assPath, width, height, duration)
+		return exportSubtitleOnly(ctx, job, assPath, width, height, duration)
 	}
 
 	// Build complex filter for timeline using overlay with setpts for timing
@@ -179,7 +171,7 @@ func exportTimeline(job *models.ExportJob, assPath string, width, height int, du
 	log.Printf("FFmpeg command: %s %v", getFFmpegPath(), args)
 	log.Printf("Filter complex: %s", filterComplex)
 
-	cmd := exec.Command(getFFmpegPath(), args...)
+	cmd := exec.CommandContext(ctx, getFFmpegPath(), args...)
 	stderr, _ := cmd.StderrPipe()
 	stdout, _ := cmd.StdoutPipe()
 
@@ -205,7 +197,7 @@ func exportTimeline(job *models.ExportJob, assPath string, width, height int, du
 }
 
 // exportSubtitleOnly creates a black background video with subtitles
-func exportSubtitleOnly(job *models.ExportJob, assPath string, width, height int, duration float64) error {
+func exportSubtitleOnly(ctx context.Context, job *models.ExportJob, assPath string, width, height int, duration float64) error {
 	threads := runtime.NumCPU()
 	if threads > 8 {
 		threads = 8
@@ -232,7 +224,7 @@ func exportSubtitleOnly(job *models.ExportJob, assPath string, width, height int
 		job.OutputFile,
 	}
 
-	cmd := exec.Command(getFFmpegPath(), args...)
+	cmd := exec.CommandContext(ctx, getFFmpegPath(), args...)
 	stderr, _ := cmd.StderrPipe()
 	stdout, _ := cmd.StdoutPipe()
 
@@ -316,7 +308,7 @@ func generateASSFile(outputPath string, subtitles []models.Subtitle, globalStyle
 
 	// ASS header
 	header := fmt.Sprintf(`[Script Info]
-Title: LipChamp Export
+Title: VideoEditor Export
 ScriptType: v4.00+
 PlayResX: %d
 PlayResY: %d

@@ -1,5 +1,7 @@
 package models
 
+import "context"
+
 // Subtitle represents a single subtitle entry
 type Subtitle struct {
 	ID        string        `json:"id"`
@@ -61,13 +63,14 @@ type VideoClip struct {
 
 // ExportJob tracks the status of an export job
 type ExportJob struct {
-	ID           string      `json:"id"`
-	Status       string      `json:"status"` // pending, processing, completed, failed
-	Progress     int         `json:"progress"`
-	OutputFile   string      `json:"-"`
-	Error        string      `json:"error,omitempty"`
-	SubtitleOnly bool        `json:"-"` // True if exporting subtitles over black background
-	Duration     float64     `json:"-"` // Total duration of export
-	VideoFiles   []string    `json:"-"` // Paths to uploaded video files
-	Clips        []VideoClip `json:"-"` // Timeline clips with positions
+	ID           string             `json:"id"`
+	Status       string             `json:"status"` // pending, processing, completed, failed
+	Progress     int                `json:"progress"`
+	OutputFile   string             `json:"-"`
+	Error        string             `json:"error,omitempty"`
+	SubtitleOnly bool               `json:"-"` // True if exporting subtitles over black background
+	Duration     float64            `json:"-"` // Total duration of export
+	VideoFiles   []string           `json:"-"` // Paths to uploaded video files
+	Clips        []VideoClip        `json:"-"` // Timeline clips with positions
+	Cancel       context.CancelFunc `json:"-"`
 }

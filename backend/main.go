@@ -44,6 +44,7 @@ func main() {
 	api := r.Group("/api")
 	{
 		api.POST("/export", handlers.StartExport)
+		api.POST("/export/cancel/:id", handlers.CancelExport)
 		api.GET("/export/status/:id", handlers.GetExportStatus)
 		api.GET("/export/download/:id", handlers.DownloadExport)
 	}

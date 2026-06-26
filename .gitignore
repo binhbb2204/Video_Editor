@@ -4,7 +4,9 @@
 /backend/build/
 /backend/*.exe
 /backend/uploads/
+/backend/exports/
 /backend/temp/
 .DS_Store
 .env
 .env.*
+/backend/ffmpeg/bin/*.exe
