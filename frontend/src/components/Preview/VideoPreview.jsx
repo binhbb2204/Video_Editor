@@ -258,24 +258,25 @@ export const VideoPreview = () => {
         setGuides(g => ({ ...g, clipSnapX: null, clipSnapY: null }));
     };
 
-    // Only sync video position when:
-    // 1. Not playing (user is seeking via timeline)
-    // 2. Just started playing (need initial position)
+    // Only sync video position when NOT playing (user is scrubbing timeline)
     useEffect(() => {
-        if (!isPlaying) {
-            clipsAtCurrentTime.forEach(clip => {
-                const el = mediaRefs.current[clip.id];
-                if (!el || el.currentTime === undefined) return;
-                
-                const targetVideoTime = (currentTime - clip.startTimeInTimeline) + clip.startOffset;
-                const diff = Math.abs(el.currentTime - targetVideoTime);
-                
-                if (diff > 0.1) {
-                    el.currentTime = targetVideoTime;
-                }
-            });
-        }
-    }, [currentTime, clipsAtCurrentTime, isPlaying]);
+        if (isPlaying) return; // Never seek during playback!
+        
+        clipsAtCurrentTime.forEach(clip => {
+            const el = mediaRefs.current[clip.id];
+            if (!el || el.currentTime === undefined) return;
+            
+            const targetVideoTime = (currentTime - clip.startTimeInTimeline) + clip.startOffset;
+            const diff = Math.abs(el.currentTime - targetVideoTime);
+            
+            if (diff > 0.05) {
+                el.currentTime = targetVideoTime;
+            }
+        });
+    }, [currentTime, isPlaying]); // Removed clipsAtCurrentTime from deps - use stable ref
+
+    // Track which clip IDs are currently playing to manage play/pause
+    const playingClipIdsRef = useRef(new Set());
 
     // Handle play/pause transitions for ALL overlapping media
     useEffect(() => {
@@ -286,58 +287,137 @@ export const VideoPreview = () => {
             lastFrameTimeRef.current = performance.now();
         }
 
-        clipsAtCurrentTime.forEach(clip => {
-            const el = mediaRefs.current[clip.id];
-            if (!el) return;
+        // Use store directly to get fresh clips, avoid stale closure
+        const storeState = useStore.getState();
+        const storeTime = storeState.currentTime;
+        const allClips = storeState.videoClips;
+        
+        const activeClips = allClips.filter(clip =>
+            storeTime >= clip.startTimeInTimeline &&
+            storeTime <= clip.startTimeInTimeline + clip.duration
+        );
 
-            if (isPlaying) {
-                if (el.play) {
-                    // Sync to correct position before playing to avoid small jumps
-                    const targetVideoTime = (currentTime - clip.startTimeInTimeline) + clip.startOffset;
-                    if (Math.abs((el.currentTime || 0) - targetVideoTime) > 0.3) {
-                        el.currentTime = targetVideoTime;
-                    }
-                    el.play().catch(() => setPlaying(false));
+        if (isPlaying) {
+            const newPlayingIds = new Set();
+            activeClips.forEach(clip => {
+                const el = mediaRefs.current[clip.id];
+                if (!el || !el.play) return;
+                
+                // Only seek if significantly out of sync (initial play)
+                const targetVideoTime = (storeTime - clip.startTimeInTimeline) + clip.startOffset;
+                if (Math.abs((el.currentTime || 0) - targetVideoTime) > 0.3) {
+                    el.currentTime = targetVideoTime;
                 }
-            } else {
-                if (el.pause) {
-                    el.pause();
-                }
-            }
-        });
-    }, [isPlaying, clipsAtCurrentTime, currentTime, setPlaying]);
+                el.play().catch(() => {});
+                newPlayingIds.add(clip.id);
+            });
+            playingClipIdsRef.current = newPlayingIds;
+        } else {
+            // Pause all media elements
+            Object.values(mediaRefs.current).forEach(el => {
+                if (el && el.pause) el.pause();
+            });
+            playingClipIdsRef.current.clear();
+        }
+    }, [isPlaying, setPlaying]); // Only trigger on play/pause toggle, NOT on time changes
 
     // Track if we were in video mode last tick (to reset timer on transition)
     const wasInVideoModeRef = useRef(false);
+    // Throttle UI updates during playback
+    const lastUIUpdateRef = useRef(0);
 
     // RAF loop - handles both video-based and timer-based playback
     useEffect(() => {
         let raf;
 
         const tick = () => {
-            const effectiveDuration = getDuration(); // Get fresh duration each tick
-
-            if (isPlayingRef.current) {
-                const storeCurrentTime = useStore.getState().currentTime;
+            if (!isPlayingRef.current) {
+                lastFrameTimeRef.current = null;
+                wasInVideoModeRef.current = false;
+                raf = requestAnimationFrame(tick);
+                return;
+            }
+            
+            const effectiveDuration = getDuration();
+            const storeState = useStore.getState();
+            const storeTime = storeState.currentTime;
+            const allClips = storeState.videoClips;
+            
+            // Find any playing video element at current time
+            let videoBasedTime = null;
+            for (const clip of allClips) {
+                if (storeTime >= clip.startTimeInTimeline &&
+                    storeTime <= clip.startTimeInTimeline + clip.duration) {
+                    const el = mediaRefs.current[clip.id];
+                    if (el && !el.paused && el.readyState >= 2) {
+                        // Read time FROM the video element - let it be the source of truth
+                        videoBasedTime = (el.currentTime - clip.startOffset) + clip.startTimeInTimeline;
+                        break;
+                    }
+                }
+            }
+            
+            let newTime;
+            if (videoBasedTime !== null) {
+                // Video-driven: read time from video, no seeking needed
+                newTime = videoBasedTime;
+                wasInVideoModeRef.current = true;
+                lastFrameTimeRef.current = performance.now();
+            } else {
+                // Timer-driven: for gaps, subtitle-only, or post-video
+                if (wasInVideoModeRef.current) {
+                    // Just transitioned from video mode - reset timer
+                    lastFrameTimeRef.current = performance.now();
+                    wasInVideoModeRef.current = false;
+                    raf = requestAnimationFrame(tick);
+                    return;
+                }
                 
                 const now = performance.now();
                 if (lastFrameTimeRef.current) {
-                    const deltaMs = now - lastFrameTimeRef.current;
-                    const deltaSeconds = deltaMs / 1000;
-
-                    // Cap delta to prevent huge jumps (max 100ms per frame)
-                    const cappedDelta = Math.min(deltaSeconds, 0.1);
-                    const newTime = storeCurrentTime + cappedDelta;
-
-                    if (newTime >= effectiveDuration) {
-                        setCurrentTime(effectiveDuration);
-                        setPlaying(false);
-                    } else {
-                        setCurrentTime(newTime);
-                    }
+                    const deltaSeconds = Math.min((now - lastFrameTimeRef.current) / 1000, 0.1);
+                    newTime = storeTime + deltaSeconds;
+                } else {
+                    newTime = storeTime;
                 }
                 lastFrameTimeRef.current = now;
             }
+
+            if (newTime >= effectiveDuration) {
+                setCurrentTime(effectiveDuration);
+                setPlaying(false);
+            } else {
+                // Throttle UI updates to ~15fps to avoid excessive re-renders
+                const now = performance.now();
+                if (now - lastUIUpdateRef.current > 66) { // ~15fps for UI
+                    setCurrentTime(newTime);
+                    lastUIUpdateRef.current = now;
+                }
+            }
+
+            // During playback, manage which clips should be playing/paused
+            // as the playhead moves through different clips
+            const activeClipIds = new Set();
+            for (const clip of allClips) {
+                const inRange = newTime >= clip.startTimeInTimeline &&
+                                newTime <= clip.startTimeInTimeline + clip.duration;
+                const el = mediaRefs.current[clip.id];
+                if (!el) continue;
+                
+                if (inRange) {
+                    activeClipIds.add(clip.id);
+                    if (el.paused && el.play) {
+                        const targetVideoTime = (newTime - clip.startTimeInTimeline) + clip.startOffset;
+                        el.currentTime = targetVideoTime;
+                        el.play().catch(() => {});
+                    }
+                } else {
+                    if (!el.paused && el.pause) {
+                        el.pause();
+                    }
+                }
+            }
+            
             raf = requestAnimationFrame(tick);
         };
         raf = requestAnimationFrame(tick);

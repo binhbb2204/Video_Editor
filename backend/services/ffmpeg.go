@@ -177,6 +177,36 @@ func exportTimeline(ctx context.Context, job *models.ExportJob, assPath string, 
 	// Add subtitle overlay at the end
 	filterParts = append(filterParts, fmt.Sprintf("[%s]ass='%s'[vout]", currentLabel, assPath))
 
+	// Build audio mix from video clips
+	// Each clip's audio is trimmed and delayed to match its timeline position
+	audioLabels := []string{}
+	for i, clip := range clips {
+		videoInputIdx := clip.VideoIndex + 2 // +2 because 0=black, 1=audio
+		audioLabel := fmt.Sprintf("a%d", i)
+		delayMs := int(clip.StartTimeInTimeline * 1000)
+		
+		// Trim audio from source, then delay to timeline position
+		filterParts = append(filterParts, fmt.Sprintf(
+			"[%d:a]atrim=start=%.3f:duration=%.3f,asetpts=PTS-STARTPTS,adelay=%d|%d[%s]",
+			videoInputIdx, clip.StartOffset, clip.Duration, delayMs, delayMs, audioLabel,
+		))
+		audioLabels = append(audioLabels, fmt.Sprintf("[%s]", audioLabel))
+	}
+
+	// Mix all audio streams together (or use silent if no clips have audio)
+	var audioMapArg string
+	if len(audioLabels) > 0 {
+		// Mix clip audios with silent base to ensure full duration
+		allAudioInputs := fmt.Sprintf("[1:a]%s", strings.Join(audioLabels, ""))
+		filterParts = append(filterParts, fmt.Sprintf(
+			"%samix=inputs=%d:duration=longest:normalize=0[aout]",
+			allAudioInputs, len(audioLabels)+1,
+		))
+		audioMapArg = "[aout]"
+	} else {
+		audioMapArg = "1:a"
+	}
+
 	// Join all filter parts
 	filterComplex := strings.Join(filterParts, ";")
 
@@ -185,13 +215,13 @@ func exportTimeline(ctx context.Context, job *models.ExportJob, assPath string, 
 	args = append(args,
 		"-filter_complex", filterComplex,
 		"-map", "[vout]",
-		"-map", "1:a",
+		"-map", audioMapArg,
 		"-c:v", "libx264",
 		"-preset", "fast",
 		"-crf", "23",
 		"-threads", strconv.Itoa(threads),
 		"-c:a", "aac",
-		"-b:a", "128k",
+		"-b:a", "192k",
 		"-pix_fmt", "yuv420p",
 		"-movflags", "+faststart",
 		"-t", fmt.Sprintf("%.3f", duration),
@@ -357,20 +387,20 @@ WrapStyle: 0
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 `, videoWidth, videoHeight)
 
-	// Create default style from globalStyle
-	defaultStyle := createASSStyle("Default", globalStyle, videoHeight)
-
-	// Events header
-	events := "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-
-	// Generate dialogue lines
+	// Create styles and dialogues
+	var styles []string
 	var dialogues []string
-	for _, sub := range subtitles {
-		startTime := formatASSTime(sub.StartTime)
-		endTime := formatASSTime(sub.EndTime)
-
+	
+	for i, sub := range subtitles {
 		// Merge global style with subtitle's own style
 		mergedStyle := mergeStyles(globalStyle, sub.Style)
+		styleName := fmt.Sprintf("Style%d", i)
+		
+		// Generate style for this specific subtitle
+		styles = append(styles, createASSStyle(styleName, mergedStyle, videoWidth))
+
+		startTime := formatASSTime(sub.StartTime)
+		endTime := formatASSTime(sub.EndTime)
 
 		// Calculate position
 		posX := int(mergedStyle.X / 100.0 * float64(videoWidth))
@@ -380,28 +410,37 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 		text := strings.ReplaceAll(sub.Text, "\n", "\\N")
 		text = fmt.Sprintf("{\\pos(%d,%d)}%s", posX, posY, text)
 
-		dialogue := fmt.Sprintf("Dialogue: 0,%s,%s,Default,,0,0,0,,%s", startTime, endTime, text)
+		dialogue := fmt.Sprintf("Dialogue: 0,%s,%s,%s,,0,0,0,,%s", startTime, endTime, styleName, text)
 		dialogues = append(dialogues, dialogue)
 	}
 
+	// Events header
+	events := "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+
 	// Write ASS file
-	content := header + defaultStyle + events + strings.Join(dialogues, "\n")
+	content := header + strings.Join(styles, "") + events + strings.Join(dialogues, "\n")
 	return os.WriteFile(outputPath, []byte(content), 0644)
 }
 
 // createASSStyle generates ASS style definition
-func createASSStyle(name string, style models.GlobalStyle, videoHeight int) string {
+func createASSStyle(name string, style models.GlobalStyle, videoWidth int) string {
 	// Convert hex color to ASS format (&HAABBGGRR)
 	primaryColor := hexToASS(style.Color)
 	outlineColor := hexToASS(style.OutlineColor)
 
-	// Calculate font size relative to video height
+	// In frontend, sizes are relative to a REFERENCE_WIDTH of 1280
+	scaleFactor := float64(videoWidth) / 1280.0
+
+	// Calculate font size relative to video width
 	fontSize := style.FontSize
 	if fontSize == 0 {
-		fontSize = 48
+		fontSize = 32
 	}
-	// Scale font size to video resolution
-	fontSize = fontSize * videoHeight / 1080
+	scaledFontSize := int(float64(fontSize) * scaleFactor)
+
+	// Scale outline width
+	outlineWidth := style.OutlineWidth
+	scaledOutlineWidth := int(float64(outlineWidth) * scaleFactor)
 
 	// Font weight (bold if >= 600)
 	bold := 0
@@ -416,11 +455,11 @@ func createASSStyle(name string, style models.GlobalStyle, videoHeight int) stri
 	return fmt.Sprintf("Style: %s,%s,%d,%s,&H00FFFFFF,%s,&H80000000,%d,0,0,0,100,100,0,0,1,%d,0,%d,10,10,10,1\n",
 		name,
 		style.FontFamily,
-		fontSize,
+		scaledFontSize,
 		primaryColor,
 		outlineColor,
 		bold,
-		style.OutlineWidth,
+		scaledOutlineWidth,
 		alignment,
 	)
 }
