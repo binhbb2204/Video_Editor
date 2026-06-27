@@ -5,6 +5,7 @@ export const useStore = create((set, get) => ({
     // State
     videoClips: [],
     subtitles: [],
+    importedMedia: [], // Media library items
     globalStyle: { ...DEFAULT_STYLE },
     duration: 10,
     currentTime: 0,
@@ -12,8 +13,20 @@ export const useStore = create((set, get) => ({
     zoom: DEFAULT_ZOOM,
     selectedSubtitleId: null,
     selectedClipId: null,
+    projectResolution: { width: 1920, height: 1080 },
+    projectName: "Untitled Project",
+    exportJobs: [], // { id, name, status, progress, dismissed }
 
     // Actions
+    addExportJob: (job) => set((state) => ({ exportJobs: [...state.exportJobs, job] })),
+    updateExportJob: (id, updates) => set((state) => ({
+        exportJobs: state.exportJobs.map(j => j.id === id ? { ...j, ...updates } : j)
+    })),
+    removeExportJob: (id) => set((state) => ({
+        exportJobs: state.exportJobs.filter(j => j.id !== id)
+    })),
+    setProjectName: (name) => set({ projectName: name }),
+    setProjectResolution: (res) => set({ projectResolution: res }),
     setDuration: (duration) => set({ duration }),
 
     // Computed duration: max of video clips end time and subtitle end time
@@ -59,14 +72,74 @@ export const useStore = create((set, get) => ({
 
     updateGlobalStyle: (style) => set((state) => ({ globalStyle: { ...state.globalStyle, ...style } })),
 
+    // Imported Media Library
+    addImportedMedia: (media) => set((state) => ({ importedMedia: [...state.importedMedia, media] })),
+    removeImportedMedia: (id) => set((state) => ({ importedMedia: state.importedMedia.filter(m => m.id !== id) })),
+
     // Video Clips
-    addVideoClip: (clip) => set((state) => ({ videoClips: [...state.videoClips, clip] })),
+    addVideoClip: (clip) => set((state) => {
+        // New clip gets zOrder = min(existing) - 1  → goes BELOW existing clips (like "added later = lower layer")
+        const existingOrders = state.videoClips.map(c => c.zOrder ?? 0);
+        const minOrder = existingOrders.length > 0 ? Math.min(...existingOrders) : 0;
+        return {
+            videoClips: [...state.videoClips, {
+                ...clip,
+                transformX: clip.transformX ?? 50,
+                transformY: clip.transformY ?? 50,
+                transformScale: clip.transformScale ?? 100,
+                transformWidth: clip.transformWidth ?? 100,   // % of preview width
+                transformHeight: clip.transformHeight ?? 100, // % of preview height
+                zOrder: clip.zOrder ?? (minOrder - 1),
+            }]
+        };
+    }),
     updateVideoClip: (id, updates) => set((state) => ({
         videoClips: state.videoClips.map((c) => (c.id === id ? { ...c, ...updates } : c))
     })),
     removeVideoClip: (id) => set((state) => ({
         videoClips: state.videoClips.filter((c) => c.id !== id)
     })),
+
+    // Z-order controls
+    bringForward: (id) => set((state) => {
+        const clips = [...state.videoClips];
+        const clip = clips.find(c => c.id === id);
+        if (!clip) return {};
+        // Find the nearest clip with higher zOrder and swap
+        const higher = clips.filter(c => c.id !== id && (c.zOrder ?? 0) > (clip.zOrder ?? 0));
+        if (higher.length === 0) return {}; // already on top
+        const next = higher.reduce((a, b) => ((a.zOrder ?? 0) < (b.zOrder ?? 0) ? a : b));
+        const newClips = clips.map(c => {
+            if (c.id === id) return { ...c, zOrder: next.zOrder ?? 0 };
+            if (c.id === next.id) return { ...c, zOrder: clip.zOrder ?? 0 };
+            return c;
+        });
+        return { videoClips: newClips };
+    }),
+    sendBackward: (id) => set((state) => {
+        const clips = [...state.videoClips];
+        const clip = clips.find(c => c.id === id);
+        if (!clip) return {};
+        const lower = clips.filter(c => c.id !== id && (c.zOrder ?? 0) < (clip.zOrder ?? 0));
+        if (lower.length === 0) return {};
+        const prev = lower.reduce((a, b) => ((a.zOrder ?? 0) > (b.zOrder ?? 0) ? a : b));
+        const newClips = clips.map(c => {
+            if (c.id === id) return { ...c, zOrder: prev.zOrder ?? 0 };
+            if (c.id === prev.id) return { ...c, zOrder: clip.zOrder ?? 0 };
+            return c;
+        });
+        return { videoClips: newClips };
+    }),
+    bringToFront: (id) => set((state) => {
+        const clips = state.videoClips;
+        const maxOrder = Math.max(...clips.map(c => c.zOrder ?? 0));
+        return { videoClips: clips.map(c => c.id === id ? { ...c, zOrder: maxOrder + 1 } : c) };
+    }),
+    sendToBack: (id) => set((state) => {
+        const clips = state.videoClips;
+        const minOrder = Math.min(...clips.map(c => c.zOrder ?? 0));
+        return { videoClips: clips.map(c => c.id === id ? { ...c, zOrder: minOrder - 1 } : c) };
+    }),
 
     // Subtitles
     addSubtitles: (newSubs) => set((state) => ({ subtitles: [...state.subtitles, ...newSubs] })),
@@ -161,6 +234,47 @@ export const useStore = create((set, get) => ({
         });
 
         setSubtitles(updatedSubs);
+    },
+
+    // Delete gap between video clips and shift all clips after the gap to the left
+    deleteVideoGap: (gapStart, gapEnd) => {
+        const { videoClips } = get();
+        const gapDuration = gapEnd - gapStart;
+
+        if (gapDuration <= 0) return;
+
+        const updatedClips = videoClips.map(clip => {
+            // If clip starts at or after the gap end, shift it left
+            if (clip.startTimeInTimeline >= gapEnd - 0.001) {
+                return {
+                    ...clip,
+                    startTimeInTimeline: clip.startTimeInTimeline - gapDuration
+                };
+            }
+            return clip;
+        });
+
+        set({ videoClips: updatedClips });
+    },
+
+    // Shift all video clips that start at or after 'fromTime' by 'shiftAmount' seconds
+    shiftVideoClipsRight: (fromTime, shiftAmount, excludeId = null) => {
+        const { videoClips } = get();
+
+        if (shiftAmount === 0) return;
+
+        const updatedClips = videoClips.map(clip => {
+            if (clip.id === excludeId) return clip;
+            if (clip.startTimeInTimeline >= fromTime - 0.001) {
+                return {
+                    ...clip,
+                    startTimeInTimeline: Math.max(0, clip.startTimeInTimeline + shiftAmount)
+                };
+            }
+            return clip;
+        });
+
+        set({ videoClips: updatedClips });
     },
 
     // Shift all subtitles that start at or after 'fromTime' by 'shiftAmount' seconds

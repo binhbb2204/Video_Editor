@@ -66,7 +66,9 @@ export const Timeline = () => {
         splitVideoClipAtTime,
         splitSubtitleAtTime,
         deleteGap,
+        deleteVideoGap,
         shiftSubtitlesRight,
+        shiftVideoClipsRight,
         getDuration
     } = useStore();
 
@@ -84,16 +86,21 @@ export const Timeline = () => {
     const [timeInputValue, setTimeInputValue] = useState('');
     const [isEditingTime, setIsEditingTime] = useState(false);
 
+    const [clipSnapLine, setClipSnapLine] = useState(null);
+
     const subtitlesRef = useRef(subtitles);
     useEffect(() => { subtitlesRef.current = subtitles; }, [subtitles]);
+
+    const videoClipsRef = useRef(videoClips);
+    useEffect(() => { videoClipsRef.current = videoClips; }, [videoClips]);
 
     const frozenLanesRef = useRef(null);
     useEffect(() => { frozenLanesRef.current = frozenLanes; }, [frozenLanes]);
 
-    const actionsRef = useRef({ updateVideoClip, updateSubtitle, setCurrentTime, shiftSubtitlesRight });
+    const actionsRef = useRef({ updateVideoClip, updateSubtitle, setCurrentTime, shiftSubtitlesRight, shiftVideoClipsRight });
     useEffect(() => {
-        actionsRef.current = { updateVideoClip, updateSubtitle, setCurrentTime, shiftSubtitlesRight };
-    }, [updateVideoClip, updateSubtitle, setCurrentTime, shiftSubtitlesRight]);
+        actionsRef.current = { updateVideoClip, updateSubtitle, setCurrentTime, shiftSubtitlesRight, shiftVideoClipsRight };
+    }, [updateVideoClip, updateSubtitle, setCurrentTime, shiftSubtitlesRight, shiftVideoClipsRight]);
 
     useEffect(() => {
         const handleClick = () => setContextMenu(null);
@@ -218,6 +225,34 @@ export const Timeline = () => {
         return detectedGaps;
     }, [subtitles]);
 
+    // Calculate gaps between video clips
+    const videoGaps = useMemo(() => {
+        if (videoClips.length < 2) return [];
+
+        const sortedClips = [...videoClips].sort((a, b) => a.startTimeInTimeline - b.startTimeInTimeline);
+        const detectedGaps = [];
+        const MIN_GAP_THRESHOLD = 0.1;
+
+        for (let i = 0; i < sortedClips.length - 1; i++) {
+            const currentClip = sortedClips[i];
+            const nextClip = sortedClips[i + 1];
+            const gapStart = currentClip.startTimeInTimeline + currentClip.duration;
+            const gapEnd = nextClip.startTimeInTimeline;
+            const gapDuration = gapEnd - gapStart;
+
+            if (gapDuration >= MIN_GAP_THRESHOLD) {
+                detectedGaps.push({
+                    id: `vgap-${currentClip.id}-${nextClip.id}`,
+                    startTime: gapStart,
+                    endTime: gapEnd,
+                    duration: gapDuration,
+                });
+            }
+        }
+
+        return detectedGaps;
+    }, [videoClips]);
+
     const handleScroll = (e) => {
         if (e.ctrlKey) {
             e.preventDefault();
@@ -313,7 +348,51 @@ export const Timeline = () => {
                 const currentSubtitles = subtitlesRef.current || [];
 
                 if (action.type === 'move-clip') {
-                    const newStart = Math.max(0, action.originalStartTime + deltaTime);
+                    const currentClips = videoClipsRef.current || [];
+                    const clip = currentClips.find(c => c.id === action.id);
+                    if (!clip) return;
+                    const clipDuration = clip.duration;
+                    let newStart = Math.max(0, action.originalStartTime + deltaTime);
+                    let newEnd = newStart + clipDuration;
+                    const isDraggingRight = deltaTime > 0;
+                    const isDraggingLeft = deltaTime < 0;
+
+                    const otherClips = currentClips.filter(c => c.id !== action.id).sort((a, b) => a.startTimeInTimeline - b.startTimeInTimeline);
+
+                    if (isDraggingLeft) {
+                        // Block: find nearest clip to the left and clamp
+                        for (const other of otherClips) {
+                            const otherEnd = other.startTimeInTimeline + other.duration;
+                            if (otherEnd <= action.originalStartTime + 0.001 && newStart < otherEnd) {
+                                newStart = otherEnd;
+                                newEnd = newStart + clipDuration;
+                            }
+                        }
+                    }
+
+                    if (isDraggingRight) {
+                        // Ripple push right clips
+                        const rightClips = otherClips.filter(c => c.startTimeInTimeline >= action.originalStartTime + clipDuration - 0.001);
+                        const collidingClip = rightClips.find(c => newEnd > c.startTimeInTimeline && newStart < c.startTimeInTimeline + c.duration);
+                        if (collidingClip) {
+                            const pushAmount = newEnd - collidingClip.startTimeInTimeline;
+                            if (pushAmount > 0) {
+                                actionsRef.current.shiftVideoClipsRight(collidingClip.startTimeInTimeline, pushAmount, action.id);
+                            }
+                        }
+                    }
+
+                    // Snap detection for visual feedback
+                    let snapTime = null;
+                    for (const other of otherClips) {
+                        const otherEnd = other.startTimeInTimeline + other.duration;
+                        let s = checkSnap(otherEnd, newStart);
+                        if (s !== null && !isDraggingRight) { snapTime = s; newStart = s; newEnd = newStart + clipDuration; break; }
+                        s = checkSnap(other.startTimeInTimeline, newEnd);
+                        if (s !== null && !isDraggingRight) { snapTime = s; newStart = s - clipDuration; newEnd = s; break; }
+                    }
+                    setClipSnapLine(snapTime);
+
                     actionsRef.current.updateVideoClip(action.id, { startTimeInTimeline: newStart });
                 } else if (action.type === 'move-sub') {
                     // Y-axis drag for lane switching
@@ -466,6 +545,7 @@ export const Timeline = () => {
             setFrozenLanes(null);
             setSnapLine(null);
             setSnappedSubId(null);
+            setClipSnapLine(null);
         };
 
         window.addEventListener('mousemove', handleMouseMove);
@@ -555,24 +635,112 @@ export const Timeline = () => {
                 </div>
             </div>
 
-            <div ref={containerRef} className="flex-1 overflow-auto relative scroll-smooth" onWheel={handleScroll} onMouseDown={handleMouseDown}>
+            <div ref={containerRef} className="flex-1 overflow-auto relative scroll-smooth" onWheel={handleScroll} onMouseDown={handleMouseDown}
+                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }}
+                onDrop={(e) => {
+                    e.preventDefault();
+                    try {
+                        const mediaData = JSON.parse(e.dataTransfer.getData('application/json'));
+                        if (mediaData && mediaData.url) {
+                            const rect = containerRef.current.getBoundingClientRect();
+                            const x = e.clientX - rect.left + containerRef.current.scrollLeft;
+                            const { videoClips, addVideoClip, setDuration, getDuration: gd } = useStore.getState();
+                            let dropTime = Math.max(0, x / zoom);
+                            
+                            // Snap to 0 if it's the very first clip added to the timeline
+                            if (videoClips.length === 0) {
+                                dropTime = 0;
+                            }
+                            // Calculate zOrder so overlapping clips go underneath (like subtitles)
+                            let newZOrder = 0;
+                            const dropDuration = mediaData.duration || 5;
+                            if (videoClips.length > 0) {
+                                const overlapping = videoClips.filter(c => {
+                                    const overlapStart = Math.max(c.startTimeInTimeline, dropTime);
+                                    const overlapEnd = Math.min(c.startTimeInTimeline + c.duration, dropTime + dropDuration);
+                                    return overlapStart < overlapEnd;
+                                });
+                                if (overlapping.length > 0) {
+                                    newZOrder = Math.min(...overlapping.map(c => c.zOrder ?? 0)) - 1;
+                                }
+                            }
+
+                            addVideoClip({
+                                id: `clip-${Date.now()}`,
+                                name: mediaData.name,
+                                url: mediaData.url,
+                                type: mediaData.type || 'video',
+                                duration: dropDuration,
+                                startTimeInTimeline: dropTime,
+                                startOffset: 0,
+                                playbackRate: 1,
+                                zOrder: newZOrder
+                            });
+                            const newEnd = dropTime + dropDuration + 0.1;
+                            const curDur = gd();
+                            if (newEnd > curDur) setDuration(newEnd);
+                        }
+                    } catch (err) { console.warn('Drop failed', err); }
+                }}
+            >
                 <div className="relative min-h-full" style={{ width: Math.max(containerRef.current?.clientWidth || 0, effectiveDuration * zoom + 200) }}>
                     <div className="sticky top-0 z-20 h-8 bg-zinc-900 border-b border-zinc-800 pointer-events-none">{renderRuler()}</div>
 
                     {/* Video Track */}
-                    <div className="relative h-20 border-b border-zinc-800/50 bg-zinc-950/30 flex items-center">
+                    <div className="relative border-b border-zinc-800/50 bg-zinc-950/30 flex items-center" 
+                         style={{ height: Math.max(80, [...new Set(videoClips.map(c => c.zOrder ?? 0))].length * 64 + 30) }}>
                         <div className="absolute left-0 top-0 text-[10px] text-zinc-600 pl-2 pt-1 uppercase tracking-widest font-bold pointer-events-none z-10 sticky left-0">Video Track</div>
-                        {videoClips.map((clip) => (
-                            <div
-                                key={clip.id}
-                                onContextMenu={(e) => handleContextMenu(e, 'clip', clip.id)}
-                                className={`absolute h-14 rounded overflow-hidden cursor-move border-2 select-none ${selectedClipId === clip.id ? 'border-blue-500 bg-blue-500/20' : 'border-zinc-700 bg-zinc-800/40'}`}
-                                style={{ left: clip.startTimeInTimeline * zoom, width: clip.duration * zoom, top: 15 }}
-                                onMouseDown={(e) => handleClipMouseDown(e, clip.id)}
-                            >
-                                <div className="px-2 py-1 text-[10px] font-medium truncate text-zinc-300">{clip.name}</div>
+                        {(() => {
+                            const uniqueZOrders = [...new Set(videoClips.map(c => c.zOrder ?? 0))].sort((a,b) => b - a);
+                            return videoClips.map((clip) => {
+                                const laneIdx = uniqueZOrders.indexOf(clip.zOrder ?? 0);
+                                const topPos = 15 + (laneIdx >= 0 ? laneIdx : 0) * 64;
+                                return (
+                                    <div
+                                        key={clip.id}
+                                        onContextMenu={(e) => handleContextMenu(e, 'clip', clip.id)}
+                                        className={`absolute h-14 rounded overflow-hidden cursor-move border-2 select-none flex flex-col justify-center shadow-lg transition-colors ${selectedClipId === clip.id ? 'border-blue-500 bg-blue-500/30 shadow-blue-500/20 z-10' : 'border-zinc-700 bg-zinc-800/60 hover:bg-zinc-700/60'}`}
+                                        style={{ left: clip.startTimeInTimeline * zoom, width: clip.duration * zoom, top: topPos }}
+                                        onMouseDown={(e) => handleClipMouseDown(e, clip.id)}
+                                    >
+                                        <div className="px-2 py-1 text-[10px] font-bold truncate text-white pointer-events-none">{clip.name}</div>
+                                        <div className="px-2 text-[8px] truncate text-zinc-400 pointer-events-none uppercase">{clip.type || 'VIDEO'}</div>
+                                    </div>
+                                );
+                            });
+                        })()}
+
+                        {/* Video Gap Indicators with Delete Button */}
+                        {videoGaps.map((gap) => {
+                            const gapWidth = gap.duration * zoom;
+                            if (gapWidth < 20) return null;
+                            return (
+                                <div
+                                    key={gap.id}
+                                    className="absolute h-14 flex items-center justify-center group cursor-pointer"
+                                    style={{ left: gap.startTime * zoom, width: gapWidth, top: 15 }}
+                                    onClick={(e) => e.stopPropagation()}
+                                >
+                                    <div className="absolute inset-0 border-2 border-dashed border-zinc-600/50 rounded opacity-0 group-hover:opacity-100 transition-opacity bg-zinc-800/20" />
+                                    <div className="opacity-0 group-hover:opacity-100 transition-all transform scale-90 group-hover:scale-100">
+                                        <button
+                                            onClick={(e) => { e.stopPropagation(); deleteVideoGap(gap.startTime, gap.endTime); }}
+                                            className="flex items-center justify-center w-6 h-6 bg-red-600 hover:bg-red-500 rounded text-white transition-all shadow-lg"
+                                            title="Delete this gap"
+                                        >
+                                            <TrashIcon />
+                                        </button>
+                                    </div>
+                                </div>
+                            );
+                        })}
+
+                        {/* Clip Snap Line */}
+                        {clipSnapLine !== null && (
+                            <div className="absolute top-0 bottom-0 w-px bg-yellow-400 z-50 pointer-events-none shadow-[0_0_10px_rgba(250,204,21,0.8)]" style={{ left: clipSnapLine * zoom }}>
+                                <div className="absolute -top-1 -left-1 w-2 h-2 rounded-full bg-yellow-400" />
                             </div>
-                        ))}
+                        )}
                     </div>
 
                     {/* Subtitle Track Area */}

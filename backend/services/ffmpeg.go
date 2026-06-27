@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -90,8 +91,15 @@ func exportTimeline(ctx context.Context, job *models.ExportJob, assPath string, 
 		threads = 8
 	}
 
-	// Sort clips by start time
 	clips := job.Clips
+
+	// Sort clips by zOrder to ensure correct layering
+	sort.SliceStable(clips, func(i, j int) bool {
+		if clips[i].ZOrder == clips[j].ZOrder {
+			return clips[i].StartTimeInTimeline < clips[j].StartTimeInTimeline
+		}
+		return clips[i].ZOrder < clips[j].ZOrder
+	})
 
 	// If no clips, treat as subtitle-only
 	if len(clips) == 0 {
@@ -118,11 +126,21 @@ func exportTimeline(ctx context.Context, job *models.ExportJob, assPath string, 
 		videoInputIdx := clip.VideoIndex + 2 // +2 because 0=black, 1=audio
 		clipLabel := fmt.Sprintf("clip%d", i)
 
-		// Trim from source, scale, pad to target size, then set timestamp for when to appear
+		tw := clip.TransformWidth
+		if tw == 0 { tw = 100 }
+		th := clip.TransformHeight
+		if th == 0 { th = 100 }
+
+		targetW := int(tw / 100.0 * float64(width))
+		targetH := int(th / 100.0 * float64(height))
+		if targetW <= 0 { targetW = width }
+		if targetH <= 0 { targetH = height }
+
+		// Trim from source, scale, and set timestamp for when to appear
 		filterParts = append(filterParts, fmt.Sprintf(
-			"[%d:v]trim=start=%.3f:duration=%.3f,setpts=PTS-STARTPTS+%.3f/TB,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:black,setpts=PTS-STARTPTS+%.3f/TB[%s]",
+			"[%d:v]trim=start=%.3f:duration=%.3f,setpts=PTS-STARTPTS+%.3f/TB,scale=%d:%d,setsar=1,setpts=PTS-STARTPTS+%.3f/TB[%s]",
 			videoInputIdx, clip.StartOffset, clip.Duration, clip.StartTimeInTimeline,
-			width, height, width, height, clip.StartTimeInTimeline, clipLabel,
+			targetW, targetH, clip.StartTimeInTimeline, clipLabel,
 		))
 	}
 
@@ -135,9 +153,23 @@ func exportTimeline(ctx context.Context, job *models.ExportJob, assPath string, 
 		startTime := clip.StartTimeInTimeline
 		endTime := clip.StartTimeInTimeline + clip.Duration
 
+		tw := clip.TransformWidth
+		if tw == 0 { tw = 100 }
+		th := clip.TransformHeight
+		if th == 0 { th = 100 }
+		tx := clip.TransformX
+		if tx == 0 { tx = 50 }
+		ty := clip.TransformY
+		if ty == 0 { ty = 50 }
+
+		targetW := int(tw / 100.0 * float64(width))
+		targetH := int(th / 100.0 * float64(height))
+		posX := int(tx/100.0*float64(width)) - targetW/2
+		posY := int(ty/100.0*float64(height)) - targetH/2
+
 		filterParts = append(filterParts, fmt.Sprintf(
-			"[%s][%s]overlay=0:0:enable='between(t,%.3f,%.3f)':shortest=0[%s]",
-			currentLabel, clipLabel, startTime, endTime, outLabel,
+			"[%s][%s]overlay=%d:%d:enable='between(t,%.3f,%.3f)':shortest=0[%s]",
+			currentLabel, clipLabel, posX, posY, startTime, endTime, outLabel,
 		))
 		currentLabel = outLabel
 	}
@@ -266,8 +298,15 @@ func parseProgress(stdout io.Reader, job *models.ExportJob, duration float64) {
 					progress = 100
 				}
 				job.Progress = progress
+				log.Printf("Progress updated: %d%% (timeSec: %.2f, duration: %.2f)", progress, timeSec, duration)
+			} else {
+				log.Printf("Cannot calculate progress, duration is 0")
 			}
 		}
+	}
+	
+	if err := scanner.Err(); err != nil {
+		log.Printf("Error reading stdout progress: %v", err)
 	}
 }
 

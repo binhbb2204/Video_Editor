@@ -55,10 +55,15 @@ type ExportRequest struct {
 
 // VideoClip represents a clip on the timeline
 type VideoClip struct {
-	VideoIndex          int     `json:"videoIndex"`          // Index of source video file
-	StartTimeInTimeline float64 `json:"startTimeInTimeline"` // Position on timeline
-	StartOffset         float64 `json:"startOffset"`         // Offset in source video
-	Duration            float64 `json:"duration"`            // Duration of clip
+	VideoIndex          int     `json:"videoIndex"`
+	StartTimeInTimeline float64 `json:"startTimeInTimeline"`
+	StartOffset         float64 `json:"startOffset"`
+	Duration            float64 `json:"duration"`
+	ZOrder              int     `json:"zOrder"`
+	TransformX          float64 `json:"transformX"`
+	TransformY          float64 `json:"transformY"`
+	TransformWidth      float64 `json:"transformWidth"`
+	TransformHeight     float64 `json:"transformHeight"`
 }
 
 // ExportJob tracks the status of an export job
@@ -67,6 +72,7 @@ type ExportJob struct {
 	Status       string             `json:"status"` // pending, processing, completed, failed
 	Progress     int                `json:"progress"`
 	OutputFile   string             `json:"-"`
+	ProjectName  string             `json:"-"`
 	Error        string             `json:"error,omitempty"`
 	SubtitleOnly bool               `json:"-"` // True if exporting subtitles over black background
 	Duration     float64            `json:"-"` // Total duration of export

@@ -45,6 +45,7 @@ func StartExport(c *gin.Context) {
 	globalStyleJSON := c.PostForm("globalStyle")
 	resolution := c.DefaultPostForm("resolution", "1080")
 	format := c.DefaultPostForm("format", "mp4")
+	projectName := c.DefaultPostForm("projectName", "Untitled Project")
 
 	// Parse subtitles
 	var subtitles []models.Subtitle
@@ -77,6 +78,7 @@ func StartExport(c *gin.Context) {
 		Status:       "pending",
 		Progress:     0,
 		OutputFile:   outputPath,
+		ProjectName:  projectName,
 		SubtitleOnly: subtitleOnly,
 		Duration:     duration,
 	}
@@ -238,9 +240,24 @@ func DownloadExport(c *gin.Context) {
 		return
 	}
 
+	// Sanitize project name for filename
+	cleanName := "VideoExport"
+	if job.ProjectName != "" {
+		// Only keep alphanumeric, space, dash, and underscore
+		validName := ""
+		for _, char := range job.ProjectName {
+			if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == ' ' || char == '-' || char == '_' {
+				validName += string(char)
+			}
+		}
+		if len(validName) > 0 {
+			cleanName = validName
+		}
+	}
+
 	// Serve the file for download
-	filename := "VideoEditor_Export_" + jobID[:8] + filepath.Ext(job.OutputFile)
-	c.Header("Content-Disposition", "attachment; filename="+filename)
+	filename := cleanName + filepath.Ext(job.OutputFile)
+	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
 	c.File(job.OutputFile)
 
 	if err := os.Remove(job.OutputFile); err != nil && !os.IsNotExist(err) {

@@ -5,36 +5,34 @@ import { ExportIcon } from '../Icons';
 const API_URL = 'http://localhost:8080';
 
 export const ExportModal = ({ onClose }) => {
-    const { videoClips, subtitles, globalStyle, getDuration } = useStore();
+    const { videoClips, subtitles, globalStyle, getDuration, projectName, addExportJob, exportJobs, projectResolution } = useStore();
     const [format, setFormat] = useState('mp4');
-    const [resolution, setResolution] = useState('1080');
-    const [isExporting, setIsExporting] = useState(false);
-    const [progress, setProgress] = useState(0);
-    const [exportStatus, setExportStatus] = useState('');
-    const [jobId, setJobId] = useState(null);
-    const pollIntervalRef = useRef(null);
+    const [resolution, setResolution] = useState(`${projectResolution.width}x${projectResolution.height}`);
+    
+    // Global Export State Machine
+    const activeJob = exportJobs.find(j => j.status === 'pending' || j.status === 'processing');
+    let modalState = activeJob ? 'EXPORTING' : 'IDLE';
 
-    // Cleanup polling on unmount
-    useEffect(() => {
-        return () => {
-            if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
-            }
-        };
-    }, []);
+    const progress = activeJob ? activeJob.progress : 0;
+    const exportStatus = activeJob 
+        ? (activeJob.status === 'processing' ? `Encoding: ${progress}%` : activeJob.status)
+        : '';
+
+    // No polling here anymore
 
     const handleExport = async () => {
         const effectiveDuration = getDuration();
+
+        if (modalState === 'EXPORTING') {
+            console.warn('Export is already running. Please wait for it to finish.');
+            return;
+        }
 
         // Check if there's any content to export
         if (videoClips.length === 0 && subtitles.length === 0) {
             alert('No content to export. Add a video or subtitles first.');
             return;
         }
-
-        setIsExporting(true);
-        setProgress(0);
-        setExportStatus(videoClips.length > 0 ? 'Uploading video...' : 'Preparing subtitles...');
 
         try {
             // Prepare form data
@@ -58,7 +56,12 @@ export const ExportModal = ({ onClose }) => {
                     videoIndex: urlToIndex[clip.url],
                     startTimeInTimeline: clip.startTimeInTimeline,
                     startOffset: clip.startOffset,
-                    duration: clip.duration
+                    duration: clip.duration,
+                    zOrder: clip.zOrder ?? 0,
+                    transformX: clip.transformX ?? 50,
+                    transformY: clip.transformY ?? 50,
+                    transformWidth: clip.transformWidth ?? 100,
+                    transformHeight: clip.transformHeight ?? 100
                 }));
                 formData.append('clips', JSON.stringify(clipsData));
                 formData.append('videoCount', uniqueUrls.length.toString());
@@ -73,9 +76,9 @@ export const ExportModal = ({ onClose }) => {
             formData.append('globalStyle', JSON.stringify(globalStyle));
             formData.append('resolution', resolution);
             formData.append('format', format);
+            formData.append('projectName', projectName || "Untitled Project");
 
             // Start export
-            setExportStatus('Starting export...');
             const response = await fetch(`${API_URL}/api/export`, {
                 method: 'POST',
                 body: formData,
@@ -87,91 +90,51 @@ export const ExportModal = ({ onClose }) => {
             }
 
             const data = await response.json();
-            setJobId(data.jobId);
-            setExportStatus('Processing...');
+            
+            addExportJob({
+                id: data.jobId,
+                name: projectName || "Untitled Project",
+                status: 'pending',
+                progress: 0,
+                dismissed: false
+            });
 
-            // Poll for progress
-            pollIntervalRef.current = setInterval(async () => {
-                try {
-                    const statusRes = await fetch(`${API_URL}/api/export/status/${data.jobId}`);
-                    const statusData = await statusRes.json();
-
-                    setProgress(statusData.progress || 0);
-
-                    if (statusData.status === 'completed') {
-                        clearInterval(pollIntervalRef.current);
-                        setExportStatus('Download starting...');
-
-                        // Download the file
-                        window.location.href = `${API_URL}/api/export/download/${data.jobId}`;
-
-                        setTimeout(() => {
-                            setIsExporting(false);
-                            onClose();
-                        }, 1000);
-                    } else if (statusData.status === 'failed') {
-                        clearInterval(pollIntervalRef.current);
-                        throw new Error(statusData.error || 'Export failed');
-                    } else {
-                        setExportStatus(`Encoding: ${statusData.progress}%`);
-                    }
-                } catch (err) {
-                    console.error('Status poll error:', err);
-                }
-            }, 1000);
+            onClose();
 
         } catch (error) {
             console.error('Export error:', error);
-            setExportStatus(`Error: ${error.message}`);
-            setIsExporting(false);
-            if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
-            }
+            alert(`Error: ${error.message}`);
         }
     };
 
     const handleCancel = async () => {
-        if (!isExporting || !jobId) {
+        if (modalState !== 'EXPORTING' || !activeJob) {
             onClose();
             return;
         }
 
         try {
-            setExportStatus('Canceling export...');
-            const response = await fetch(`${API_URL}/api/export/cancel/${jobId}`, {
+            const response = await fetch(`${API_URL}/api/export/cancel/${activeJob.id}`, {
                 method: 'POST',
             });
-
-            if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.error || 'Cancel failed');
+            if (response.ok) {
+                onClose();
             }
-
-            if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
-                pollIntervalRef.current = null;
-            }
-
-            setProgress(0);
-            setIsExporting(false);
-            setExportStatus('Export canceled');
-            onClose();
         } catch (error) {
             console.error('Cancel export error:', error);
-            setExportStatus(`Error: ${error.message}`);
         }
     };
 
     return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
             <div className="bg-zinc-900 border border-zinc-800 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden">
                 <div className="p-6 border-b border-zinc-800 flex items-center justify-between">
                     <h3 className="text-xl font-bold">Export Video</h3>
-                    <button onClick={onClose} disabled={isExporting} className="text-zinc-500 hover:text-white transition disabled:opacity-50">✕</button>
+                    <button onClick={onClose} disabled={modalState === 'EXPORTING'} className="text-zinc-500 hover:text-white transition disabled:opacity-50">✕</button>
                 </div>
 
                 <div className="p-6 space-y-6">
-                    {!isExporting ? (
+                    {modalState === 'IDLE' && (
                         <>
                             <div className="grid grid-cols-2 gap-4">
                                 <div className="space-y-2">
@@ -194,7 +157,9 @@ export const ExportModal = ({ onClose }) => {
                                 <strong>Server Export:</strong> Video is processed on backend with FFmpeg for perfect quality and audio sync.
                             </div>
                         </>
-                    ) : (
+                    )}
+
+                    {modalState === 'EXPORTING' && (
                         <div className="py-12 flex flex-col items-center justify-center space-y-6">
                             <div className="relative w-32 h-32">
                                 <svg className="w-full h-full -rotate-90">
@@ -212,10 +177,18 @@ export const ExportModal = ({ onClose }) => {
                 </div>
 
                 <div className="p-4 bg-zinc-950/50 flex space-x-3">
-                    <button onClick={handleCancel} className="flex-1 py-3 text-sm font-bold text-zinc-400 hover:text-white transition disabled:opacity-50">{isExporting ? 'Cancel Export' : 'Cancel'}</button>
-                    <button disabled={isExporting} onClick={handleExport} className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white text-sm font-bold rounded-xl transition flex items-center justify-center space-x-2 disabled:opacity-50">
-                        <ExportIcon /> <span>{isExporting ? 'Exporting...' : 'Start Export'}</span>
-                    </button>
+                    {modalState === 'EXPORTING' && (
+                        <button onClick={handleCancel} className="flex-1 py-3 text-sm font-bold text-red-400 hover:bg-red-500/10 rounded-xl transition border border-red-500/20">Cancel Export</button>
+                    )}
+
+                    {modalState === 'IDLE' && (
+                        <>
+                            <button onClick={onClose} className="flex-1 py-3 text-sm font-bold text-zinc-400 hover:text-white transition">Cancel</button>
+                            <button onClick={handleExport} className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white text-sm font-bold rounded-xl transition flex items-center justify-center space-x-2">
+                                <ExportIcon /> <span>Start Export</span>
+                            </button>
+                        </>
+                    )}
                 </div>
             </div>
         </div>
